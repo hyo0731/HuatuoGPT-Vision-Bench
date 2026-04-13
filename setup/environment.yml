@@ -1,4 +1,5 @@
 cat << 'EOF' > setup/environment.yml
+# HuatuoGPT-Vision-VQA-Bench Env Setup
 name: huatuo
 channels:
   - defaults
