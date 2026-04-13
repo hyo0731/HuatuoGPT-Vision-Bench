@@ -7,7 +7,7 @@ import torch
 from tqdm import tqdm
 
 # =====================================================================
-# 1. 경로 설정 (절대 경로 고정)
+# 1. 경로 설정 (절대 경로)
 # =====================================================================
 repo_path = "/workspace/HuatuoGPT-Vision-Bench/HuatuoGPT-Vision"
 project_root = "/workspace/HuatuoGPT-Vision-Bench"
@@ -19,11 +19,11 @@ try:
     from cli import HuatuoChatbot, IMAGE_TOKEN_INDEX
     print(f"✅ [VQA-RAD] 모델 로드 성공: {repo_path}")
 except ImportError:
-    print(f"❌ 에러: {repo_path}/cli.py를 찾을 수 없습니다.")
+    print(f"❌ 에러: {repo_path}에서 모듈을 찾을 수 없습니다.")
     sys.exit(1)
 
 # =====================================================================
-# 2. 채점 함수 (동일)
+# 2. 채점 함수
 # =====================================================================
 def normalize_answer(text):
     if not text: return ""
@@ -69,24 +69,19 @@ for i in tqdm(range(0, len(test_data), BATCH_SIZE)):
         img_path = os.path.join(img_dir, item['image_name'])
         if not os.path.exists(img_path): continue
             
-        # [해결] num_images=1 인자를 추가했습니다.
         prompt = bot.insert_image_placeholder(item['question'], 1)
-        
-        try:
-            ids = bot.tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt')
-        except:
-            from cli import tokenizer_image_token
-            ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt')
+        ids = bot.tokenizer_image_token(prompt, return_tensors='pt')
 
         if ids.dim() == 2: ids = ids.squeeze(0)
-        input_ids_list.append(ids); image_paths.append(img_path); valid_items.append(item)
+        input_ids_list.append(ids)
+        image_paths.append(img_path)
+        valid_items.append(item)
 
     if not valid_items: continue
 
     try:
-        img_tensors = bot.get_image_tensors(image_paths)
-        if isinstance(img_tensors, list): img_tensors = torch.cat(img_tensors, dim=0)
-        img_tensors = img_tensors.half().cuda()
+        list_image_tensors = bot.get_image_tensors(image_paths)
+        img_tensors = torch.stack(list_image_tensors).to(dtype=torch.bfloat16).cuda()
         
         max_len = max([len(ids) for ids in input_ids_list])
         padded_ids, attention_masks = [], []
@@ -99,14 +94,23 @@ for i in tqdm(range(0, len(test_data), BATCH_SIZE)):
         attention_mask_tensor = torch.stack(attention_masks).cuda()
         
         with torch.no_grad():
-            output_ids = model.generate(input_ids=input_ids_tensor, attention_mask=attention_mask_tensor, images=img_tensors, do_sample=False, max_new_tokens=128, use_cache=True)
+            output_ids = model.generate(
+                input_ids=input_ids_tensor, 
+                attention_mask=attention_mask_tensor, 
+                images=img_tensors, 
+                do_sample=False, 
+                max_new_tokens=128, 
+                use_cache=True
+            )
         responses = tokenizer.batch_decode(output_ids[:, input_ids_tensor.shape[1]:], skip_special_tokens=True)
         
         with open(output_csv, mode='a', encoding='utf-8', newline='') as f:
             writer = csv.writer(f)
             for item, resp in zip(valid_items, responses):
                 writer.writerow([item['qid'], item['question'], item.get('answer_type', 'OPEN'), item['answer'], resp.strip(), check_correctness(item['answer'], resp, item.get('answer_type', 'OPEN'))])
-    except Exception:
-        torch.cuda.empty_cache(); continue
+    except Exception as e:
+        print(f"⚠️ 배치 에러 발생: {e}")
+        torch.cuda.empty_cache()
+        continue
 
 print(f"🎉 VQA-RAD 완료! 결과: {output_csv}")
