@@ -7,9 +7,8 @@ import torch
 from tqdm import tqdm
 
 # =====================================================================
-# 1. 경로 강제 고정 (절대 경로)
+# 1. 경로 설정 (절대 경로 고정)
 # =====================================================================
-# 효근 님의 실제 서버 경로를 그대로 박았습니다.
 repo_path = "/workspace/HuatuoGPT-Vision-Bench/HuatuoGPT-Vision"
 project_root = "/workspace/HuatuoGPT-Vision-Bench"
 
@@ -18,13 +17,13 @@ if repo_path not in sys.path:
 
 try:
     from cli import HuatuoChatbot, IMAGE_TOKEN_INDEX
-    print(f"✅ [VQA-RAD] 모델 로드 성공! (경로: {repo_path})")
+    print(f"✅ [VQA-RAD] 모델 로드 성공: {repo_path}")
 except ImportError:
     print(f"❌ 에러: {repo_path}/cli.py를 찾을 수 없습니다.")
     sys.exit(1)
 
 # =====================================================================
-# 2. 채점 함수
+# 2. 채점 함수 (동일)
 # =====================================================================
 def normalize_answer(text):
     if not text: return ""
@@ -38,7 +37,7 @@ def check_correctness(gt, pred, q_type):
     return 1.0 if gt_norm in pred_norm else 0.0
 
 # =====================================================================
-# 3. 모델 및 데이터 설정
+# 3. 모델 설정
 # =====================================================================
 bot = HuatuoChatbot("FreedomIntelligence/HuatuoGPT-Vision-7b")
 model, tokenizer = bot.model, bot.tokenizer
@@ -58,7 +57,7 @@ with open(data_path, 'r') as f:
     test_data = json.load(f)
 
 # =====================================================================
-# 4. 추론 루프 (에러 진단 기능 추가)
+# 4. 추론 루프
 # =====================================================================
 print(f"🚀 VQA-RAD 추론 시작 (총 {len(test_data)} 문항)...")
 
@@ -67,23 +66,22 @@ for i in tqdm(range(0, len(test_data), BATCH_SIZE)):
     input_ids_list, image_paths, valid_items = [], [], []
     
     for item in batch:
-        # 절대 경로로 이미지 위치 계산
         img_path = os.path.join(img_dir, item['image_name'])
-        
-        if not os.path.exists(img_path):
-            if i == 0: print(f"\n⚠️ 파일을 찾을 수 없음: {img_path}")
-            continue
+        if not os.path.exists(img_path): continue
             
-        prompt = bot.insert_image_placeholder(item['question'])
-        ids = bot.tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt')
-        if ids.dim() == 2: ids = ids.squeeze(0)
+        # [해결] num_images=1 인자를 추가했습니다.
+        prompt = bot.insert_image_placeholder(item['question'], 1)
         
-        input_ids_list.append(ids)
-        image_paths.append(img_path)
-        valid_items.append(item)
+        try:
+            ids = bot.tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt')
+        except:
+            from cli import tokenizer_image_token
+            ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt')
 
-    if not valid_items:
-        continue # 이미지가 없으면 추론을 안 하니까 0초 만에 끝나는 겁니다.
+        if ids.dim() == 2: ids = ids.squeeze(0)
+        input_ids_list.append(ids); image_paths.append(img_path); valid_items.append(item)
+
+    if not valid_items: continue
 
     try:
         img_tensors = bot.get_image_tensors(image_paths)
@@ -108,8 +106,7 @@ for i in tqdm(range(0, len(test_data), BATCH_SIZE)):
             writer = csv.writer(f)
             for item, resp in zip(valid_items, responses):
                 writer.writerow([item['qid'], item['question'], item.get('answer_type', 'OPEN'), item['answer'], resp.strip(), check_correctness(item['answer'], resp, item.get('answer_type', 'OPEN'))])
-    except Exception as e:
-        torch.cuda.empty_cache()
-        continue
+    except Exception:
+        torch.cuda.empty_cache(); continue
 
-print(f"🎉 VQA-RAD 완료! {output_csv}")
+print(f"🎉 VQA-RAD 완료! 결과: {output_csv}")

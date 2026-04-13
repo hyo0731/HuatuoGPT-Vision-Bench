@@ -17,9 +17,9 @@ if repo_path not in sys.path:
 
 try:
     from cli import HuatuoChatbot, IMAGE_TOKEN_INDEX
-    print(f"✅ [SLAKE] 모델 모듈 로드 성공: {repo_path}")
+    print(f"✅ [SLAKE] 모델 로드 성공: {repo_path}")
 except ImportError:
-    print(f"❌ 에러: {repo_path}/cli.py를 찾을 수 없습니다. setup/download_assets.sh를 먼저 실행하세요.")
+    print(f"❌ 에러: {repo_path}/cli.py를 찾을 수 없습니다.")
     sys.exit(1)
 
 # =====================================================================
@@ -39,7 +39,6 @@ def check_correctness(gt, pred, q_type):
 # =====================================================================
 # 3. 모델 및 데이터 설정
 # =====================================================================
-print("🤖 HuatuoGPT-Vision 모델 로딩 중...")
 bot = HuatuoChatbot("FreedomIntelligence/HuatuoGPT-Vision-7b")
 model, tokenizer = bot.model, bot.tokenizer
 if tokenizer.pad_token is None: tokenizer.pad_token = tokenizer.eos_token
@@ -58,7 +57,7 @@ with open(data_path, 'r') as f:
     test_data = json.load(f)
 
 # =====================================================================
-# 4. 추론 루프
+# 4. 추론 루프 (TypeError 해결됨)
 # =====================================================================
 print(f"🚀 SLAKE 추론 시작 (총 {len(test_data)} 문항)...")
 
@@ -68,19 +67,19 @@ for i in tqdm(range(0, len(test_data), BATCH_SIZE)):
     
     for item in batch:
         img_path = os.path.join(img_dir, item['image_name'])
-        
-        if not os.path.exists(img_path):
-            # 여전히 못 찾으면 디버깅 출력
-            if i == 0: print(f"\n⚠️ 파일을 찾을 수 없음: {img_path}")
-            continue
+        if not os.path.exists(img_path): continue
             
-        prompt = bot.insert_image_placeholder(item['question'])
-        ids = bot.tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt')
-        if ids.dim() == 2: ids = ids.squeeze(0)
+        # [해결] num_images=1 인자를 추가했습니다.
+        prompt = bot.insert_image_placeholder(item['question'], 1)
         
-        input_ids_list.append(ids)
-        image_paths.append(img_path)
-        valid_items.append(item)
+        try:
+            ids = bot.tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt')
+        except:
+            from cli import tokenizer_image_token
+            ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt')
+            
+        if ids.dim() == 2: ids = ids.squeeze(0)
+        input_ids_list.append(ids); image_paths.append(img_path); valid_items.append(item)
 
     if not valid_items: continue
 
@@ -107,8 +106,7 @@ for i in tqdm(range(0, len(test_data), BATCH_SIZE)):
             writer = csv.writer(f)
             for item, resp in zip(valid_items, responses):
                 writer.writerow([item['qid'], item['question'], item.get('answer_type', 'OPEN'), item['answer'], resp.strip(), check_correctness(item['answer'], resp, item.get('answer_type', 'OPEN'))])
-    except Exception as e:
-        torch.cuda.empty_cache()
-        continue
+    except Exception:
+        torch.cuda.empty_cache(); continue
 
 print(f"🎉 SLAKE 완료! 결과: {output_csv}")
