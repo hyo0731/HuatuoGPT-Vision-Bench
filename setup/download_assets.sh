@@ -36,7 +36,7 @@ def process_dataset(ds_name, save_name):
     for i, item in enumerate(tqdm(ds)):
         # 이미지 저장
         img_filename = f'{save_name}_test_{i}.jpg'
-        item['image'].convert('RGB').save(os.path.join(img_dir, img_filename))
+        item['img'].convert('RGB').save(os.path.join(img_dir, img_filename))
         
         # 필드 구성 (SLAKE/VQA-RAD 공통 규격화)
         ans = str(item['answer']).strip()
