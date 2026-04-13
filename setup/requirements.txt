@@ -20,5 +20,6 @@ Pygments==2.16.1
 transformers==4.37.2
 datasets
 pandas
+setuptools
 gdown
 ipykernel
