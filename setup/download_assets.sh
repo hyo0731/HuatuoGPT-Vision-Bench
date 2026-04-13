@@ -7,7 +7,7 @@ REPO_PATH="$PROJECT_ROOT/$REPO_NAME"
 
 echo "📂 원본 저장 및 데이터 경로: $REPO_PATH"
 
-# 2. 원본 모델 레포지토리가 없으면 클론 (Bench 폴더 내부로)
+# 2. 원본 모델 레포지토리 클론
 if [ ! -d "$REPO_PATH" ]; then
     echo "🚀 [1/2] 원본 레포지토리 클론 중..."
     git clone https://github.com/FreedomIntelligence/HuatuoGPT-Vision.git "$REPO_PATH"
@@ -15,8 +15,8 @@ else
     echo "✅ [1/2] 원본 레포지토리가 이미 존재합니다."
 fi
 
-# 3. 데이터셋 다운로드 및 필드 에러 해결 (Python)
-echo "🚀 [2/2] 데이터셋 다운로드 및 필드 자동 분석 시작..."
+# 3. 데이터셋 다운로드 (이미지 필드 강제 탐색 로직 추가)
+echo "🚀 [2/2] 데이터셋 다운로드 및 필드 정밀 분석 시작..."
 DATA_DIR="$REPO_PATH/data"
 
 python3 -c "
@@ -28,26 +28,42 @@ from PIL import Image
 data_dir = '$DATA_DIR'
 
 def process_dataset(ds_name, save_name):
-    print(f'\n--- {ds_name} 처리 중 ---')
+    print(f'\n--- {ds_name} 분석 중 ---')
     target_path = os.path.join(data_dir, save_name)
     img_dir = os.path.join(target_path, 'imgs')
     os.makedirs(img_dir, exist_ok=True)
     
-    # 데이터 로드
+    # 1. 데이터 로드
     ds = load_dataset(ds_name, split='test')
     
-    # [핵심] 이미지 필드명 자동 탐색 (img 혹은 image)
+    # 2. 첫 번째 아이템의 모든 키 출력 (디버깅용)
     sample = ds[0]
-    img_key = next((k for k in ['img', 'image', 'raw_image'] if k in sample), None)
+    print(f'🔍 발견된 필드 목록: {list(sample.keys())}')
     
+    # 3. 이미지 필드 찾기 (우선순위: image -> img -> PIL객체 타입)
+    img_key = None
+    for k in ['image', 'img', 'raw_image']:
+        if k in sample:
+            img_key = k
+            break
+            
     if not img_key:
-        print(f'❌ 에러: {ds_name}에서 이미지 필드를 찾을 수 없습니다.')
+        # 키 이름으로 못 찾으면 데이터 타입을 직접 확인
+        for k, v in sample.items():
+            if isinstance(v, Image.Image):
+                img_key = k
+                break
+
+    if not img_key:
+        print(f'❌ 에러: {ds_name}에서 이미지 데이터를 찾을 수 없습니다.')
         return
+
+    print(f'✅ 사용될 이미지 필드명: \"{img_key}\"')
 
     formatted_data = []
     for i, item in enumerate(tqdm(ds)):
-        # SLAKE 영어 데이터만 필터링
-        if save_name == 'slake' and item.get('q_lang') == 'zh':
+        # SLAKE 영어 데이터만 추출
+        if save_name == 'slake' and item.get('q_lang') != 'en':
             continue
 
         img_filename = f'{save_name}_test_{i}.jpg'
@@ -55,9 +71,11 @@ def process_dataset(ds_name, save_name):
         try:
             # 이미지 저장
             img_obj = item[img_key]
+            if not isinstance(img_obj, Image.Image):
+                 continue
+            
             img_obj.convert('RGB').save(os.path.join(img_dir, img_filename))
             
-            # 공통 데이터 규격화
             formatted_data.append({
                 'qid': f'{save_name}_{i}',
                 'image_name': img_filename,
@@ -68,12 +86,11 @@ def process_dataset(ds_name, save_name):
         except Exception as e:
             continue
     
-    # 평가 코드가 바로 인식하도록 'test.json'으로 저장
     with open(os.path.join(target_path, 'test.json'), 'w', encoding='utf-8') as f:
         json.dump(formatted_data, f, indent=4)
-    print(f'✅ {save_name} 완료!')
+    print(f'✅ {save_name} 완료! (총 {len(formatted_data)}개 추출)')
 
 process_dataset('BoKelvin/SLAKE', 'slake')
 process_dataset('flaviagiammarino/vqa-rad', 'vqarad')
 "
-echo "🎉 모든 데이터 준비 완료! 이제 scripts/ 평가 코드를 돌리세요."
+echo "🎉 준비 완료!"

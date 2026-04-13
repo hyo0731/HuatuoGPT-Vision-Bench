@@ -7,20 +7,24 @@ import torch
 from tqdm import tqdm
 
 # =====================================================================
-# 1. 동적 상대 경로 설정 (환경 독립성 보장)
+# 1. 경로 설정 (HuatuoGPT-Vision-Bench 내부 구조 반영)
 # =====================================================================
-current_dir = os.path.dirname(os.path.abspath(__file__))
-project_root = os.path.abspath(os.path.join(current_dir, ".."))
-workspace_root = os.path.abspath(os.path.join(project_root, ".."))
+current_dir = os.path.dirname(os.path.abspath(__file__)) # scripts/
+project_root = os.path.abspath(os.path.join(current_dir, "..")) # Bench/
+repo_path = os.path.join(project_root, "HuatuoGPT-Vision")
 
-repo_path = os.path.join(workspace_root, "HuatuoGPT-Vision-Bench")
 if repo_path not in sys.path:
     sys.path.append(repo_path)
 
-from cli import HuatuoChatbot, IMAGE_TOKEN_INDEX
+try:
+    from cli import HuatuoChatbot, IMAGE_TOKEN_INDEX
+    print(f"✅ [VQA-RAD] 모듈 로드 성공: {repo_path}")
+except ImportError:
+    print(f"❌ [VQA-RAD] 에러: {repo_path}에서 cli.py를 찾을 수 없습니다.")
+    sys.exit(1)
 
 # =====================================================================
-# 2. 전처리 및 부분 점수 채점 함수
+# 2. 채점 함수
 # =====================================================================
 def get_word_variations(word):
     variations = {word}
@@ -46,63 +50,44 @@ def check_correctness(gt, pred, q_type):
         return round(match_count / len(gt_items), 4)
 
 # =====================================================================
-# 3. 모델 로딩 및 설정
+# 3. 모델 및 데이터 설정
 # =====================================================================
-print("VQA-RAD 병렬 평가 모델 로딩 중...")
 bot = HuatuoChatbot("FreedomIntelligence/HuatuoGPT-Vision-7b")
-model = bot.model
-tokenizer = bot.tokenizer
-
-if tokenizer.pad_token is None:
-    tokenizer.pad_token = tokenizer.eos_token
+model, tokenizer = bot.model, bot.tokenizer
+if tokenizer.pad_token is None: tokenizer.pad_token = tokenizer.eos_token
 tokenizer.padding_side = "left"
 
 BATCH_SIZE = 4
-
-# 데이터 경로 (원본 Huatuo 레포 안의 data 폴더 참조)
-data_path = os.path.join(repo_path, "data", "vqarad", "vqarad_test.json")
+data_path = os.path.join(repo_path, "data", "vqarad", "test.json") # test.json으로 통일
 img_dir = os.path.join(repo_path, "data", "vqarad", "imgs")
-
-# 결과 파일 경로 (내 레포지토리의 results 폴더에 저장)
 output_csv = os.path.join(project_root, "results", "huatuo_vqarad_eval.csv")
-os.makedirs(os.path.dirname(output_csv), exist_ok=True)
 
-headers = ["qid", "question", "q_type", "ground_truth", "pure_pred", "preprocessed_pred", "score"]
+os.makedirs(os.path.dirname(output_csv), exist_ok=True)
 with open(output_csv, mode='w', encoding='utf-8', newline='') as f:
-    csv.writer(f).writerow(headers)
+    csv.writer(f).writerow(["qid", "question", "q_type", "ground_truth", "pure_pred", "preprocessed_pred", "score"])
 
 with open(data_path, 'r') as f:
     test_data = json.load(f)
 
-print(f"\n🚀 VQA-RAD Batch Size {BATCH_SIZE} 초고속 평가 시작...")
-
 # =====================================================================
-# 4. 메인 추론 루프
+# 4. 추론 루프
 # =====================================================================
 for i in tqdm(range(0, len(test_data), BATCH_SIZE)):
     batch = test_data[i : i + BATCH_SIZE]
-    
     try:
         input_ids_list, image_paths, valid_items = [], [], []
-        
         for item in batch:
-            img_path = os.path.join(img_dir, item['image_name']) # VQA-RAD는 image_name 사용
+            img_path = os.path.join(img_dir, item['image_name'])
             if not os.path.exists(img_path): continue
-            
             prompt = bot.insert_image_placeholder(item['question'])
             try: ids = bot.tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt')
-            except: 
+            except:
                 from cli import tokenizer_image_token
                 ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors='pt')
-                
             if ids.dim() == 2: ids = ids.squeeze(0)
-            
-            input_ids_list.append(ids)
-            image_paths.append(img_path)
-            valid_items.append(item)
-            
+            input_ids_list.append(ids); image_paths.append(img_path); valid_items.append(item)
+
         if not valid_items: continue
-        
         img_tensors = bot.get_image_tensors(image_paths)
         if isinstance(img_tensors, list): img_tensors = torch.cat(img_tensors, dim=0)
         img_tensors = img_tensors.half().cuda()
@@ -118,35 +103,14 @@ for i in tqdm(range(0, len(test_data), BATCH_SIZE)):
         attention_mask_tensor = torch.stack(attention_masks).cuda()
         
         with torch.no_grad():
-            output_ids = model.generate(
-                input_ids=input_ids_tensor, attention_mask=attention_mask_tensor,
-                images=img_tensors, do_sample=False, max_new_tokens=128, use_cache=True
-            )
-            
+            output_ids = model.generate(input_ids=input_ids_tensor, attention_mask=attention_mask_tensor, images=img_tensors, do_sample=False, max_new_tokens=128, use_cache=True)
         responses = tokenizer.batch_decode(output_ids[:, input_ids_tensor.shape[1]:], skip_special_tokens=True)
         
         with open(output_csv, mode='a', encoding='utf-8', newline='') as f:
             writer = csv.writer(f)
             for item, response in zip(valid_items, responses):
-                pure_pred = response.strip()
-                q_type = item.get('answer_type', 'OPEN')
-                gt, prep_pred = item['answer'], normalize_answer(pure_pred)
-                writer.writerow([item.get('qid', 'N/A'), item['question'], q_type, gt, pure_pred, prep_pred, check_correctness(gt, pure_pred, q_type)])
+                writer.writerow([item['qid'], item['question'], item.get('answer_type', 'OPEN'), item['answer'], response.strip(), normalize_answer(response), check_correctness(item['answer'], response, item.get('answer_type', 'OPEN'))])
+    except Exception:
+        torch.cuda.empty_cache(); continue
 
-    except Exception as e:
-        if 'memory' in str(e).lower(): torch.cuda.empty_cache()
-        for item in batch:
-            img_path = os.path.join(img_dir, item['image_name'])
-            if not os.path.exists(img_path): continue
-            try:
-                bot.clear_history()
-                try: pure_pred = bot.inference(item['question'], [img_path])
-                except: pure_pred = bot.chat(item['question'], [img_path])
-                
-                q_type = item.get('answer_type', 'OPEN')
-                gt, prep_pred = item['answer'], normalize_answer(pure_pred)
-                with open(output_csv, mode='a', encoding='utf-8', newline='') as f:
-                    csv.writer(f).writerow([item.get('qid', 'N/A'), item['question'], q_type, gt, pure_pred, prep_pred, check_correctness(gt, pure_pred, q_type)])
-            except: pass
-
-print(f"\n🎉 VQA-RAD 평가 완료! {output_csv}를 확인하세요.")
+print(f"🎉 VQA-RAD 완료! {output_csv}")
