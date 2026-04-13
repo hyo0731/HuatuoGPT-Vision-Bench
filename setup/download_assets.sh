@@ -3,7 +3,7 @@
 # 1. 경로 설정 (프로젝트 루트 기준)
 PROJECT_ROOT=$(pwd)
 WORKSPACE_ROOT=$(dirname "$PROJECT_ROOT")
-REPO_PATH="$WORKSPACE_ROOT/HuatuoGPT-Vision"
+REPO_PATH="$WORKSPACE_ROOT/HuatuoGPT-Vision-Bench"
 DATA_DIR="$REPO_PATH/data"
 
 echo "📂 작업 경로: $PROJECT_ROOT"
