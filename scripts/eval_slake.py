@@ -10,8 +10,9 @@ from tqdm import tqdm
 # 1. 경로 설정 (HuatuoGPT-Vision-Bench 내부 구조 반영)
 # =====================================================================
 current_dir = os.path.dirname(os.path.abspath(__file__)) # scripts/
-project_root = os.path.abspath(os.path.join(current_dir, "..")) # Bench/
-# 이제 내 폴더(Bench) 바로 아래에 있는 Vision 폴더를 참조합니다.
+project_root = os.path.abspath(os.path.join(current_dir, "..")) # /workspace/HuatuoGPT-Vision-Bench
+
+# [중요] Bench 폴더 바로 아래에 있는 HuatuoGPT-Vision을 가리켜야 합니다.
 repo_path = os.path.join(project_root, "HuatuoGPT-Vision")
 
 if repo_path not in sys.path:
@@ -19,9 +20,9 @@ if repo_path not in sys.path:
 
 try:
     from cli import HuatuoChatbot, IMAGE_TOKEN_INDEX
-    print(f"✅ [SLAKE] 모듈 로드 성공: {repo_path}")
+    print(f"✅ [VQA-RAD] 모듈 로드 성공: {repo_path}")
 except ImportError:
-    print(f"❌ [SLAKE] 에러: {repo_path}에서 cli.py를 찾을 수 없습니다.")
+    print(f"❌ 에러: {repo_path}/cli.py를 찾을 수 없습니다. 경로를 확인하세요.")
     sys.exit(1)
 
 # =====================================================================
