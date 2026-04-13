@@ -3,11 +3,10 @@ import json
 import csv
 import re
 import sys
-import torch
 from tqdm import tqdm
 
 # =====================================================================
-# 1. 경로 설정 (절대 경로)
+# 1. 경로 설정 (HuatuoGPT-Vision-Bench 내부 구조 반영)
 # =====================================================================
 repo_path = "/workspace/HuatuoGPT-Vision-Bench/HuatuoGPT-Vision"
 project_root = "/workspace/HuatuoGPT-Vision-Bench"
@@ -15,102 +14,86 @@ project_root = "/workspace/HuatuoGPT-Vision-Bench"
 if repo_path not in sys.path:
     sys.path.append(repo_path)
 
-try:
-    from cli import HuatuoChatbot, IMAGE_TOKEN_INDEX
-    print(f"✅ [VQA-RAD] 모델 로드 성공: {repo_path}")
-except ImportError:
-    print(f"❌ 에러: {repo_path}에서 모듈을 찾을 수 없습니다.")
-    sys.exit(1)
+from cli import HuatuoChatbot
 
 # =====================================================================
 # 2. 채점 함수
 # =====================================================================
+def get_word_variations(word):
+    variations = {word}
+    if word.endswith('ies'): variations.add(word[:-3] + 'y')
+    elif word.endswith('es') and len(word) > 3: variations.update([word[:-2], word[:-1]])
+    elif word.endswith('s') and len(word) > 2: variations.add(word[:-1])
+    else: variations.update([word + 's', word + 'es'])
+    return list(variations)
+
 def normalize_answer(text):
     if not text: return ""
-    return re.sub(r'[^\w\s]', '', str(text).lower().strip()).strip()
+    text = str(text).lower().strip()
+    return re.sub(r'[^\w\s]', '', text).strip()
 
 def check_correctness(gt, pred, q_type):
     pred_norm = normalize_answer(pred)
-    gt_norm = normalize_answer(gt)
     if q_type.upper() == "CLOSED":
+        gt_norm = normalize_answer(gt)
         return 1.0 if (gt_norm in pred_norm or pred_norm in gt_norm) else 0.0
-    return 1.0 if gt_norm in pred_norm else 0.0
+    else:
+        gt_items = [item.strip() for item in str(gt).split(',')]
+        if not gt_items or gt_items == ['']: return 0.0
+        match_count = sum(1 for item in gt_items if normalize_answer(item) and re.search(r'\b(' + '|'.join(map(re.escape, get_word_variations(normalize_answer(item)))) + r')\b', pred_norm))
+        return round(match_count / len(gt_items), 4)
 
 # =====================================================================
-# 3. 모델 설정
+# 3. 모델 준비
 # =====================================================================
+print("🤖 VQA-RAD 모델 로딩 중...")
 bot = HuatuoChatbot("FreedomIntelligence/HuatuoGPT-Vision-7b")
-model, tokenizer = bot.model, bot.tokenizer
-if tokenizer.pad_token is None: tokenizer.pad_token = tokenizer.eos_token
-tokenizer.padding_side = "left"
 
-BATCH_SIZE = 4
 data_path = os.path.join(repo_path, "data", "vqarad", "test.json")
 img_dir = os.path.join(repo_path, "data", "vqarad", "imgs")
 output_csv = os.path.join(project_root, "results", "huatuo_vqarad_eval.csv")
 
 os.makedirs(os.path.dirname(output_csv), exist_ok=True)
+headers = ["qid", "question", "q_type", "ground_truth", "pure_pred", "preprocessed_pred", "score"]
 with open(output_csv, mode='w', encoding='utf-8', newline='') as f:
-    csv.writer(f).writerow(["qid", "question", "q_type", "ground_truth", "pure_pred", "score"])
+    csv.writer(f).writerow(headers)
 
 with open(data_path, 'r') as f:
     test_data = json.load(f)
 
 # =====================================================================
-# 4. 추론 루프
+# 4. 안전한 순차 처리 (Sequential)
 # =====================================================================
-print(f"🚀 VQA-RAD 추론 시작 (총 {len(test_data)} 문항)...")
+print(f"\n🚀 총 {len(test_data)}개 샘플 평가 시작... (결과는 실시간 CSV 저장)")
 
-for i in tqdm(range(0, len(test_data), BATCH_SIZE)):
-    batch = test_data[i : i + BATCH_SIZE]
-    input_ids_list, image_paths, valid_items = [], [], []
+for item in tqdm(test_data):
+    image_path = os.path.join(img_dir, item['image_name'])
+    if not os.path.exists(image_path):
+        continue
     
-    for item in batch:
-        img_path = os.path.join(img_dir, item['image_name'])
-        if not os.path.exists(img_path): continue
-            
-        prompt = bot.insert_image_placeholder(item['question'], 1)
-        ids = bot.tokenizer_image_token(prompt, return_tensors='pt')
-
-        if ids.dim() == 2: ids = ids.squeeze(0)
-        input_ids_list.append(ids)
-        image_paths.append(img_path)
-        valid_items.append(item)
-
-    if not valid_items: continue
-
+    qid = item.get('qid', 'N/A')
+    question = item['question']
+    q_type = item.get('answer_type', 'OPEN')
+    gt = item['answer']
+    
     try:
-        list_image_tensors = bot.get_image_tensors(image_paths)
-        img_tensors = torch.stack(list_image_tensors).to(dtype=torch.bfloat16).cuda()
+        bot.clear_history()
         
-        max_len = max([len(ids) for ids in input_ids_list])
-        padded_ids, attention_masks = [], []
-        for ids in input_ids_list:
-            pad_len = max_len - len(ids)
-            padded_ids.append(torch.cat([torch.full((pad_len,), tokenizer.pad_token_id, dtype=ids.dtype), ids]))
-            attention_masks.append(torch.cat([torch.zeros(pad_len, dtype=torch.long), torch.ones(len(ids), dtype=torch.long)]))
-
-        input_ids_tensor = torch.stack(padded_ids).cuda()
-        attention_mask_tensor = torch.stack(attention_masks).cuda()
+        try:
+            pure_pred_list = bot.inference(question, [image_path])
+            pure_pred = pure_pred_list[0] if pure_pred_list else "" 
+        except TypeError:
+            pure_pred = bot.chat(question, [image_path])
+        except Exception as e:
+            continue
         
-        with torch.no_grad():
-            output_ids = model.generate(
-                input_ids=input_ids_tensor, 
-                attention_mask=attention_mask_tensor, 
-                images=img_tensors, 
-                do_sample=False, 
-                max_new_tokens=128, 
-                use_cache=True
-            )
-        responses = tokenizer.batch_decode(output_ids[:, input_ids_tensor.shape[1]:], skip_special_tokens=True)
+        prep_pred = normalize_answer(pure_pred)
+        score = check_correctness(gt, pure_pred, q_type)
         
         with open(output_csv, mode='a', encoding='utf-8', newline='') as f:
-            writer = csv.writer(f)
-            for item, resp in zip(valid_items, responses):
-                writer.writerow([item['qid'], item['question'], item.get('answer_type', 'OPEN'), item['answer'], resp.strip(), check_correctness(item['answer'], resp, item.get('answer_type', 'OPEN'))])
+            csv.writer(f).writerow([qid, question, q_type, gt, pure_pred, prep_pred, score])
+            
     except Exception as e:
-        print(f"⚠️ 배치 에러 발생: {e}")
-        torch.cuda.empty_cache()
         continue
 
-print(f"🎉 VQA-RAD 완료! 결과: {output_csv}")
+print(f"\n🎉 VQA-RAD 평가 완료! {output_csv} 파일을 확인하세요.")

@@ -3,11 +3,10 @@ import json
 import csv
 import re
 import sys
-import torch
 from tqdm import tqdm
 
 # =====================================================================
-# 1. 경로 설정 (절대 경로)
+# 1. 경로 설정 (HuatuoGPT-Vision-Bench 내부 구조 반영)
 # =====================================================================
 repo_path = "/workspace/HuatuoGPT-Vision-Bench/HuatuoGPT-Vision"
 project_root = "/workspace/HuatuoGPT-Vision-Bench"
@@ -15,65 +14,94 @@ project_root = "/workspace/HuatuoGPT-Vision-Bench"
 if repo_path not in sys.path:
     sys.path.append(repo_path)
 
-try:
-    from cli import HuatuoChatbot, IMAGE_TOKEN_INDEX
-    print(f"✅ [SLAKE] 모델 로드 성공: {repo_path}")
-except ImportError:
-    print(f"❌ 에러: {repo_path}에서 모듈을 찾을 수 없습니다.")
-    sys.exit(1)
+# [핵심] 다른 거 다 빼고 오직 개발자의 챗봇 클래스만 가져옵니다.
+from cli import HuatuoChatbot
 
 # =====================================================================
 # 2. 채점 함수
 # =====================================================================
+def get_word_variations(word):
+    variations = {word}
+    if word.endswith('ies'): variations.add(word[:-3] + 'y')
+    elif word.endswith('es') and len(word) > 3: variations.update([word[:-2], word[:-1]])
+    elif word.endswith('s') and len(word) > 2: variations.add(word[:-1])
+    else: variations.update([word + 's', word + 'es'])
+    return list(variations)
+
 def normalize_answer(text):
     if not text: return ""
-    return re.sub(r'[^\w\s]', '', str(text).lower().strip()).strip()
+    text = str(text).lower().strip()
+    return re.sub(r'[^\w\s]', '', text).strip()
 
 def check_correctness(gt, pred, q_type):
     pred_norm = normalize_answer(pred)
-    gt_norm = normalize_answer(gt)
     if q_type.upper() == "CLOSED":
+        gt_norm = normalize_answer(gt)
         return 1.0 if (gt_norm in pred_norm or pred_norm in gt_norm) else 0.0
-    return 1.0 if gt_norm in pred_norm else 0.0
+    else:
+        gt_items = [item.strip() for item in str(gt).split(',')]
+        if not gt_items or gt_items == ['']: return 0.0
+        match_count = sum(1 for item in gt_items if normalize_answer(item) and re.search(r'\b(' + '|'.join(map(re.escape, get_word_variations(normalize_answer(item)))) + r')\b', pred_norm))
+        return round(match_count / len(gt_items), 4)
 
 # =====================================================================
-# 3. 모델 및 데이터 설정
+# 3. 모델 준비
 # =====================================================================
+print("🤖 SLAKE 모델 로딩 중...")
 bot = HuatuoChatbot("FreedomIntelligence/HuatuoGPT-Vision-7b")
-model, tokenizer = bot.model, bot.tokenizer
-if tokenizer.pad_token is None: tokenizer.pad_token = tokenizer.eos_token
-tokenizer.padding_side = "left"
 
-BATCH_SIZE = 4
 data_path = os.path.join(repo_path, "data", "slake", "test.json")
 img_dir = os.path.join(repo_path, "data", "slake", "imgs")
 output_csv = os.path.join(project_root, "results", "huatuo_slake_eval.csv")
 
 os.makedirs(os.path.dirname(output_csv), exist_ok=True)
+headers = ["qid", "question", "q_type", "ground_truth", "pure_pred", "preprocessed_pred", "score"]
 with open(output_csv, mode='w', encoding='utf-8', newline='') as f:
-    csv.writer(f).writerow(["qid", "question", "q_type", "ground_truth", "pure_pred", "score"])
+    csv.writer(f).writerow(headers)
 
 with open(data_path, 'r') as f:
     test_data = json.load(f)
 
 # =====================================================================
-# 4. 추론 루프
+# 4. 안전한 순차 처리 (Sequential)
 # =====================================================================
-print(f"🚀 SLAKE 추론 시작 (총 {len(test_data)} 문항)...")
+print(f"\n🚀 총 {len(test_data)}개 샘플 평가 시작... (결과는 실시간 CSV 저장)")
 
-for i in tqdm(range(0, len(test_data), BATCH_SIZE)):
-    batch = test_data[i : i + BATCH_SIZE]
-    input_ids_list, image_paths, valid_items = [], [], []
+for item in tqdm(test_data):
+    # SLAKE는 image_name (아까 전처리로 경로 통일함)
+    image_path = os.path.join(img_dir, item['image_name'])
+    if not os.path.exists(image_path):
+        continue
     
-    for item in batch:
-        img_path = os.path.join(img_dir, item['image_name'])
-        if not os.path.exists(img_path): continue
-            
-        # [수정 1] 인자 개수 맞춤
-        prompt = bot.insert_image_placeholder(item['question'], 1)
+    qid = item.get('qid', 'N/A')
+    question = item['question']
+    q_type = item.get('answer_type', 'OPEN')
+    gt = item['answer']
+    
+    try:
+        # 매번 챗봇의 이전 기억을 지워줍니다.
+        bot.clear_history()
         
-        # [수정 2] cli.py의 함수 시그니처에 맞게 호출 (tokenizer 인자 제거)
-        ids = bot.tokenizer_image_token(prompt, return_tensors='pt')
+        # 모델의 공식 메서드 사용! (배치 말고 하나씩)
+        try:
+            pure_pred_list = bot.inference(question, [image_path])
+            # bot.inference는 리스트를 반환하므로 첫 번째 요소 추출
+            pure_pred = pure_pred_list[0] if pure_pred_list else "" 
+        except TypeError:
+            pure_pred = bot.chat(question, [image_path])
+        except Exception as e:
+            print(f"⚠️ inference 에러: {e}")
+            continue
+        
+        prep_pred = normalize_answer(pure_pred)
+        score = check_correctness(gt, pure_pred, q_type)
+        
+        # 실시간 저장
+        with open(output_csv, mode='a', encoding='utf-8', newline='') as f:
+            csv.writer(f).writerow([qid, question, q_type, gt, pure_pred, prep_pred, score])
             
-        if ids.dim() == 2: ids = ids.squeeze(0)
-        input_ids_list.append(ids)
+    except Exception as e:
+        print(f"\n⚠️ ID {qid} 에러: {e}")
+        continue
+
+print(f"\n🎉 SLAKE 평가 완료! {output_csv} 파일을 확인하세요.")
