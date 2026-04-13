@@ -18,6 +18,7 @@ wandb==0.15.12
 wavedrom==2.0.3.post3
 Pygments==2.16.1
 transformers==4.37.2
+gradio==3.50.2
 datasets
 pandas
 setuptools
