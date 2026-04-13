@@ -17,7 +17,7 @@ project_root = os.path.abspath(os.path.join(current_dir, ".."))
 workspace_root = os.path.abspath(os.path.join(project_root, ".."))
 
 # HuatuoGPT-Vision 모델 레포지토리 경로
-repo_path = os.path.join(workspace_root, "HuatuoGPT-Vision")
+repo_path = os.path.join(workspace_root, "HuatuoGPT-Vision-Bench")
 if repo_path not in sys.path:
     sys.path.append(repo_path)
 
