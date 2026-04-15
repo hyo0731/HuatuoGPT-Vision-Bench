@@ -5,10 +5,6 @@ HuatuoGPT-Vision/data/
 # 내부 원본 repo
 HuatuoGPT-Vision/
 
-# 실험 결과 (결과물은 로컬에서만 관리)
-results/*.csv
-results/*.json
-
 # 모델 가중치 및 대용량 파일
 *.pt
 *.pth
